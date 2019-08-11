@@ -17,7 +17,14 @@
 #define degreesToRadians(angleDegrees) ((angleDegrees) * M_PI / 180.0)
 #define radiansToDegrees(angleRadians) ((angleRadians) * 180.0 / M_PI)
 
-#define OVERSAMPLE_SCALE 2.0
+
+#include <openvr/openvr_capi.h>
+extern const char * VR_GetVRInitErrorAsSymbol(EVRInitError error);
+extern intptr_t VR_GetGenericInterface(const char *pchInterfaceVersion, EVRInitError *peError);
+extern intptr_t VR_InitInternal(EVRInitError *peError, EVRApplicationType eType);
+struct VR_IVRSystem_FnTable* systemfn;
+void check_error(int line, EVRInitError error) { if (error != 0) printf("%d: error %s\n", line, VR_GetVRInitErrorAsSymbol(error)); }
+
 
 void GLAPIENTRY
 gl_debug_callback(GLenum source, GLenum type, GLuint id, GLenum severity,
@@ -84,6 +91,20 @@ void draw_cubes(GLuint shader)
 	glDrawArrays(GL_TRIANGLES, 0, 36);
 }
 
+void draw_hmd(GLuint shader, mat4_t *model_matrix)
+{
+	int modelLoc = glGetUniformLocation(shader, "model");
+	int colorLoc = glGetUniformLocation(shader, "uniformColor");
+
+
+	mat4_t scaled = m4_mul(*model_matrix, m4_scaling(vec3(1.0, 0.5, 0.25)));
+
+	vec3_t hmd_color = vec3(1, 1, 1);
+	glUniformMatrix4fv(modelLoc, 1, GL_FALSE, (float*) scaled.m);
+	glUniform4f(colorLoc, hmd_color.x, hmd_color.y, hmd_color.z, 1.0);
+	glDrawArrays(GL_TRIANGLES, 0, 36);
+}
+
 /*
 void draw_controllers(GLuint shader, ohmd_device *lc, ohmd_device *rc)
 {
@@ -106,10 +127,37 @@ void draw_controllers(GLuint shader, ohmd_device *lc, ohmd_device *rc)
 }
 */
 
+mat4_t matrix34_to_mat4 (HmdMatrix34_t *mat34)
+{
+	/*
+	return mat4(
+		mat34->m[0][0], mat34->m[1][0], mat34->m[2][0], 0,
+		mat34->m[0][1], mat34->m[1][1], mat34->m[2][1], 0,
+		mat34->m[0][2], mat34->m[1][2], mat34->m[2][2], 0,
+		mat34->m[0][3], mat34->m[1][3], mat34->m[2][3], 1
+	);
+	*/
+	return mat4(
+		mat34->m[0][0], mat34->m[0][1], mat34->m[0][2], mat34->m[0][3],
+		mat34->m[1][0], mat34->m[1][1], mat34->m[1][2], mat34->m[1][3],
+		mat34->m[2][0], mat34->m[2][1], mat34->m[2][2], mat34->m[2][3],
+		0, 0, 0, 1
+	);
+}
+
 int main(int argc, char** argv)
 {
 	int hmd_w = 1600;
 	int hmd_h = 900;
+
+	EVRInitError error;
+	VR_InitInternal (&error, EVRApplicationType_VRApplication_Background);
+	check_error(__LINE__, error);
+
+	char fn_table_name[128];
+	sprintf (fn_table_name, "FnTable:%s", IVRSystem_Version);
+	systemfn = (struct VR_IVRSystem_FnTable*) VR_GetGenericInterface(fn_table_name, &error);
+	check_error(__LINE__, error);
 
 	gl_ctx gl;
 	GLuint VAOs[2];
@@ -128,6 +176,8 @@ int main(int argc, char** argv)
 	gen__cubes();
 
 	SDL_ShowCursor(SDL_DISABLE);
+
+	TrackedDevicePose_t poses[k_unMaxTrackedDeviceCount];
 
 	bool done = false;
 	while(!done){
@@ -149,7 +199,6 @@ int main(int argc, char** argv)
 		glViewport(0, 0, hmd_w, hmd_h);
 		//glScissor(0, 0, hmd_w, hmd_h);
 
-
 		mat4_t projectionmatrix = m4_perspective(90, (float)hmd_w / (float)hmd_h, 0.001, 100);
 
 		glUseProgram(appshader);
@@ -167,8 +216,8 @@ int main(int argc, char** argv)
 
 		glUniformMatrix4fv(glGetUniformLocation(appshader, "proj"), 1, GL_FALSE, (GLfloat*) projectionmatrix.m);
 
-		vec3_t from = vec3(0, 0.5, 0);
-		vec3_t to = vec3(0, 0.5, -1);
+		vec3_t from = vec3(0, 7.0, 0);
+		vec3_t to = vec3(0, 0.0, -0.0001); // can't look at 0,0,0
 		vec3_t up = vec3(0, 1, 0);
 		mat4_t viewmatrix = m4_look_at(from, to, up);
 
@@ -176,6 +225,11 @@ int main(int argc, char** argv)
 
 		draw_cubes(appshader);
 		//draw_controllers(appshader, lc, rc);
+
+		systemfn->GetDeviceToAbsoluteTrackingPose(ETrackingUniverseOrigin_TrackingUniverseStanding, 0, poses, k_unMaxTrackedDeviceCount);
+		TrackedDevicePose_t* openvr_hmd_pose = &poses[0];
+		mat4_t hmd_modelmatrix = matrix34_to_mat4(&openvr_hmd_pose->mDeviceToAbsoluteTracking);
+		draw_hmd(appshader, &hmd_modelmatrix);
 
 		glBindFramebuffer(GL_FRAMEBUFFER, 0);
 
